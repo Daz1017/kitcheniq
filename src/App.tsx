@@ -1,4 +1,4 @@
-import { useState, useContext, createContext, Fragment, ReactNode, CSSProperties, ChangeEvent } from 'react';
+import { useState, useEffect, useContext, createContext, Fragment, ReactNode, CSSProperties } from 'react';
 
 // ════════════════════════════════════════════════════════════════════════════
 // THEME / SHARED STYLES
@@ -24,7 +24,7 @@ const sectionTitle: CSSProperties = { fontSize:11, color:C.muted, textTransform:
 // SHARED UI COMPONENTS
 // ════════════════════════════════════════════════════════════════════════════
 
-function Btn({ primary, danger, children, onClick, small }: { primary?:boolean; danger?:boolean; children:ReactNode; onClick?:()=>void; small?:boolean }) {
+function Btn({ primary, danger, children, onClick, small }: { primary?:boolean; danger?:boolean; children?:ReactNode; onClick?:()=>void; small?:boolean }) {
   return (
     <button onClick={onClick} style={{ display:'inline-flex', alignItems:'center', gap:5, padding: small ? '4px 10px' : '7px 14px', borderRadius:6, fontSize: small ? 11 : 12, cursor:'pointer', border:`1px solid ${primary ? C.amber : danger ? C.red : C.border}`, background: primary ? C.amber : danger ? 'rgba(239,68,68,0.12)' : 'transparent', color: primary ? '#0F1623' : danger ? C.red : C.muted, fontWeight: primary ? 600 : 400 }}>
       {children}
@@ -98,11 +98,11 @@ function DateRangePicker({ start, end, onChange, compact }: { start:string; end:
   return (
     <div>
       <div style={{ display:'flex', alignItems:'center', gap:8, flexWrap:'wrap', marginBottom:8 }}>
-        <Btn small onClick={()=>shiftRange(-7)}>◀ Prev</Btn>
+        <Btn small onClick={()=>shiftRange(-7)}>{"< Prev"}</Btn>
         <input type="date" style={{ ...inputSt, width:130, fontFamily:C.mono, fontSize:12 }} value={start} onChange={e=>onChange(e.target.value, end)} />
         <span style={{ color:C.muted, fontSize:12 }}>to</span>
         <input type="date" style={{ ...inputSt, width:130, fontFamily:C.mono, fontSize:12 }} value={end} onChange={e=>onChange(start, e.target.value)} />
-        <Btn small onClick={()=>shiftRange(7)}>Next ▶</Btn>
+        <Btn small onClick={()=>shiftRange(7)}>{"Next >"}</Btn>
       </div>
       {!compact && (
         <div style={{ display:'flex', gap:6, flexWrap:'wrap' }}>
@@ -399,47 +399,414 @@ interface StoreShape {
 
 const StoreContext = createContext<StoreShape | null>(null);
 
-// ─── Persistence layer ────────────────────────────────────────────────────────
-// usePersistedState behaves exactly like useState but reads the initial value
-// from localStorage and writes every update back automatically.
-// Key prefix 'kiq_' namespaces all data so it doesn't collide with other apps.
-// To clear all data: localStorage.clear() in the browser console.
-function usePersistedState<T>(key: string, seed: T): [T, (v: T | ((p:T)=>T)) => void] {
-  const [state, setStateRaw] = useState<T>(() => {
-    try {
-      const stored = localStorage.getItem('kiq_' + key);
-      return stored ? (JSON.parse(stored) as T) : seed;
-    } catch {
-      return seed;
-    }
-  });
+// ─── Supabase client ──────────────────────────────────────────────────────────
+const SUPABASE_URL = 'https://mtyqtnobnptllnmdrlnm.supabase.co';
+const SUPABASE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im10eXF0bm9ibnB0bGxubWRybG5tIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODI5OTQzOTMsImV4cCI6MjA5ODU3MDM5M30.CSiu4bwuUdAzKatV9-ophys5cY0RPc9pMti4KREFNuI';
 
-  const setState = (v: T | ((p:T)=>T)) => {
-    setStateRaw(prev => {
-      const next = typeof v === 'function' ? (v as (p:T)=>T)(prev) : v;
-      try { localStorage.setItem('kiq_' + key, JSON.stringify(next)); } catch {}
-      return next;
+const sb = {
+  async from(table: string) {
+    const base = `${SUPABASE_URL}/rest/v1/${table}`;
+    const headers = {
+      'apikey': SUPABASE_KEY,
+      'Authorization': `Bearer ${SUPABASE_KEY}`,
+      'Content-Type': 'application/json',
+      'Prefer': 'return=representation',
+    };
+    return {
+      async select(cols = '*') {
+        const r = await fetch(`${base}?select=${cols}&order=id`, { headers });
+        return r.json();
+      },
+      async insert(data: object | object[]) {
+        const r = await fetch(base, { method:'POST', headers, body: JSON.stringify(data) });
+        return r.json();
+      },
+      async update(data: object, id: number) {
+        const r = await fetch(`${base}?id=eq.${id}`, { method:'PATCH', headers, body: JSON.stringify(data) });
+        return r.json();
+      },
+      async upsert(data: object | object[]) {
+        const h = { ...headers, 'Prefer': 'resolution=merge-duplicates,return=representation' };
+        const r = await fetch(base, { method:'POST', headers:h, body: JSON.stringify(data) });
+        return r.json();
+      },
+      async delete(id: number) {
+        await fetch(`${base}?id=eq.${id}`, { method:'DELETE', headers });
+      },
+      async deleteWhere(col: string, val: string | number) {
+        await fetch(`${base}?${col}=eq.${val}`, { method:'DELETE', headers });
+      },
+    };
+  }
+};
+
+// ─── Row mappers (snake_case DB → camelCase app) ──────────────────────────────
+const mapIng = (r: any): Ingredient => ({
+  id: r.id, name: r.name, category: r.category, vendor: r.vendor,
+  vendorItemCode: r.vendor_item_code, purchaseUnit: r.purchase_unit,
+  packSizeOz: r.pack_size_oz, currentCost: r.current_cost, baselineCost: r.baseline_cost,
+  priceHistory: r.price_history || [], storage: r.storage, shelfLifeDays: r.shelf_life_days,
+  parLevel: r.par_level, countUnit: r.count_unit || 'lbs', minQty: r.min_qty, maxQty: r.max_qty,
+  allergens: r.allergens, glutenFree: r.gluten_free, vegetarian: r.vegetarian, vegan: r.vegan, notes: r.notes,
+});
+const mapRecipe = (r: any): Recipe => ({
+  id: r.id, name: r.name, category: r.category, type: r.type,
+  yieldQty: r.yield_qty, yieldUnit: r.yield_unit, portionSize: r.portion_size, portionUnit: r.portion_unit,
+  components: r.components || [], sellPrice: r.sell_price,
+  prepInstructions: r.prep_instructions, cookingInstructions: r.cooking_instructions,
+  holdingInstructions: r.holding_instructions, shelfLifeDays: r.shelf_life_days,
+  haccpNotes: r.haccp_notes, allergens: r.allergens, station: r.station, plateGuide: r.plate_guide, version: r.version,
+});
+const mapInvoice = (r: any): Invoice => ({
+  id: r.id, invoiceNumber: r.invoice_number, vendor: r.vendor, invoiceDate: r.invoice_date,
+  deliveryDate: r.delivery_date, poNumber: r.po_number, lines: r.lines || [], status: r.status,
+});
+const mapInv = (r: any): InventoryRow => ({
+  id: r.id, ingredientId: r.ingredient_id, name: r.name, storage: r.storage,
+  beginningQty: r.beginning_qty, purchasesQty: r.purchases_qty, endingQty: r.ending_qty,
+  theoreticalUsage: r.theoretical_usage, actualUsage: r.actual_usage, parLevel: r.par_level, countUnit: r.count_unit || 'lbs',
+});
+const mapWaste = (r: any): WasteEntry => ({
+  id: r.id, date: r.date, item: r.item, qty: r.qty, unit: r.unit, cost: r.cost,
+  reason: r.reason, station: r.station, employee: r.employee, notes: r.notes, correctiveAction: r.corrective_action,
+});
+const mapYield = (r: any): YieldTest => ({
+  id: r.id, ingredientName: r.ingredient_name, rawWeightOz: r.raw_weight_oz,
+  trimWeightOz: r.trim_weight_oz, usableWeightOz: r.usable_weight_oz,
+  costBeforeYield: r.cost_before_yield, notes: r.notes,
+});
+const mapSop = (r: any): SopEntry => ({
+  id: r.id, title: r.title, station: r.station, type: r.type, content: r.content,
+});
+const mapVendor = (r: any): Vendor => ({
+  id: r.id, name: r.name, repName: r.rep_name, phone: r.phone, email: r.email,
+  accountNumber: r.account_number, deliveryDays: r.delivery_days,
+  orderMinimum: r.order_minimum, paymentTerms: r.payment_terms, notes: r.notes,
+});
+const mapWeekly = (r: any): WeeklyEntry => ({
+  weekStart: r.week_start, weeklySales: r.weekly_sales, foodSpend: r.food_spend,
+});
+
+// ─── StoreProvider with Supabase ──────────────────────────────────────────────
+function StoreProvider({ children }: { children: ReactNode }) {
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
+
+  const [ingredients,   setIngredients]   = useState<Ingredient[]>([]);
+  const [recipes,       setRecipes]        = useState<Recipe[]>([]);
+  const [invoices,      setInvoices]       = useState<Invoice[]>([]);
+  const [inventory,     setInventory]      = useState<InventoryRow[]>([]);
+  const [waste,         setWaste]          = useState<WasteEntry[]>([]);
+  const [yieldTests,    setYieldTests]     = useState<YieldTest[]>([]);
+  const [sops,          setSops]           = useState<SopEntry[]>([]);
+  const [vendors,       setVendors]        = useState<Vendor[]>([]);
+  const [weeklyEntries, setWeeklyEntries]  = useState<WeeklyEntry[]>([]);
+  const [targetFcPct,   setTargetFcPctRaw] = useState<number>(29);
+  const [role,          setRoleRaw]        = useState('Executive Chef');
+
+  // Load all data on mount
+  useEffect(() => {
+    (async () => {
+      try {
+        const [ings, recs, invs, inv, wst, yld, sop, vnd, wkly, cfg] = await Promise.all([
+          (await sb.from('ingredients')).select(),
+          (await sb.from('recipes')).select(),
+          (await sb.from('invoices')).select(),
+          (await sb.from('inventory')).select(),
+          (await sb.from('waste')).select(),
+          (await sb.from('yield_tests')).select(),
+          (await sb.from('sops')).select(),
+          (await sb.from('vendors')).select(),
+          (await sb.from('weekly_entries')).select(),
+          (await sb.from('settings')).select(),
+        ]);
+        setIngredients((ings || []).map(mapIng));
+        setRecipes((recs || []).map(mapRecipe));
+        setInvoices((invs || []).map(mapInvoice));
+        setInventory((inv  || []).map(mapInv));
+        setWaste((wst || []).map(mapWaste));
+        setYieldTests((yld || []).map(mapYield));
+        setSops((sop || []).map(mapSop));
+        setVendors((vnd || []).map(mapVendor));
+        setWeeklyEntries((wkly || []).map(mapWeekly));
+        const settings = Object.fromEntries((cfg || []).map((s: any) => [s.key, s.value]));
+        if (settings.targetFcPct) setTargetFcPctRaw(parseFloat(settings.targetFcPct));
+        if (settings.role) setRoleRaw(settings.role);
+        setLoading(false);
+      } catch (e: any) {
+        setError('Could not connect to database. Check your internet connection and try refreshing.');
+        setLoading(false);
+      }
+    })();
+  }, []);
+
+  // ─ Setters that write to Supabase then update local state ─────────────────
+
+  // Generic: replaces entire local array (used after any mutation)
+  const syncIngredients = async () => {
+    const rows = await (await sb.from('ingredients')).select();
+    setIngredients((rows || []).map(mapIng));
+  };
+  const syncRecipes = async () => {
+    const rows = await (await sb.from('recipes')).select();
+    setRecipes((rows || []).map(mapRecipe));
+  };
+  const syncInvoices = async () => {
+    const rows = await (await sb.from('invoices')).select();
+    setInvoices((rows || []).map(mapInvoice));
+  };
+  const syncInventory = async () => {
+    const rows = await (await sb.from('inventory')).select();
+    setInventory((rows || []).map(mapInv));
+  };
+  const syncWaste = async () => {
+    const rows = await (await sb.from('waste')).select();
+    setWaste((rows || []).map(mapWaste));
+  };
+  const syncYield = async () => {
+    const rows = await (await sb.from('yield_tests')).select();
+    setYieldTests((rows || []).map(mapYield));
+  };
+  const syncSops = async () => {
+    const rows = await (await sb.from('sops')).select();
+    setSops((rows || []).map(mapSop));
+  };
+  const syncVendors = async () => {
+    const rows = await (await sb.from('vendors')).select();
+    setVendors((rows || []).map(mapVendor));
+  };
+  const syncWeekly = async () => {
+    const rows = await (await sb.from('weekly_entries')).select();
+    setWeeklyEntries((rows || []).map(mapWeekly));
+  };
+
+  const setTargetFcPct = async (v: number) => {
+    setTargetFcPctRaw(v);
+    await (await sb.from('settings')).upsert({ key: 'targetFcPct', value: String(v) });
+  };
+  const setRole = async (v: string) => {
+    setRoleRaw(v);
+    await (await sb.from('settings')).upsert({ key: 'role', value: v });
+  };
+
+  // ── Per-table write helpers ────────────────────────────────────────────────
+  // Pattern: optimistic local update, then write changed/added rows to DB,
+  // delete removed rows, re-fetch only when a new row is inserted (to get real id).
+
+  const ingToDb = (i: Ingredient) => ({
+    name: i.name, category: i.category, vendor: i.vendor, vendor_item_code: i.vendorItemCode,
+    purchase_unit: i.purchaseUnit, pack_size_oz: i.packSizeOz, current_cost: i.currentCost,
+    baseline_cost: i.baselineCost, price_history: i.priceHistory, storage: i.storage,
+    shelf_life_days: i.shelfLifeDays, par_level: i.parLevel, count_unit: i.countUnit,
+    min_qty: i.minQty, max_qty: i.maxQty, allergens: i.allergens, gluten_free: i.glutenFree,
+    vegetarian: i.vegetarian, vegan: i.vegan, notes: i.notes,
+  });
+  const setIngredientsDb = (v: Ingredient[] | ((p: Ingredient[]) => Ingredient[])) => {
+    const prev = ingredients;
+    const next = typeof v === 'function' ? v(prev) : v;
+    setIngredients(next);
+    const prevIds = new Set(prev.map(i => i.id));
+    const nextIds = new Set(next.map(i => i.id));
+    next.forEach(async item => {
+      const old = prev.find(p => p.id === item.id);
+      if (!old || JSON.stringify(old) !== JSON.stringify(item)) {
+        if (prevIds.has(item.id)) { await (await sb.from('ingredients')).update(ingToDb(item), item.id); }
+        else { await (await sb.from('ingredients')).insert(ingToDb(item)); await syncIngredients(); }
+      }
+    });
+    prev.forEach(async item => { if (!nextIds.has(item.id)) await (await sb.from('ingredients')).delete(item.id); });
+  };
+
+  const recipeToDb = (r: Recipe) => ({
+    name: r.name, category: r.category, type: r.type, yield_qty: r.yieldQty,
+    yield_unit: r.yieldUnit, portion_size: r.portionSize, portion_unit: r.portionUnit,
+    components: r.components, sell_price: r.sellPrice, prep_instructions: r.prepInstructions,
+    cooking_instructions: r.cookingInstructions, holding_instructions: r.holdingInstructions,
+    shelf_life_days: r.shelfLifeDays, haccp_notes: r.haccpNotes, allergens: r.allergens,
+    station: r.station, plate_guide: r.plateGuide, version: r.version,
+  });
+  const setRecipesDb = (v: Recipe[] | ((p: Recipe[]) => Recipe[])) => {
+    const prev = recipes;
+    const next = typeof v === 'function' ? v(prev) : v;
+    setRecipes(next);
+    const prevIds = new Set(prev.map(i => i.id));
+    const nextIds = new Set(next.map(i => i.id));
+    next.forEach(async item => {
+      const old = prev.find(p => p.id === item.id);
+      if (!old || JSON.stringify(old) !== JSON.stringify(item)) {
+        if (prevIds.has(item.id)) { await (await sb.from('recipes')).update(recipeToDb(item), item.id); }
+        else { await (await sb.from('recipes')).insert(recipeToDb(item)); await syncRecipes(); }
+      }
+    });
+    prev.forEach(async item => { if (!nextIds.has(item.id)) await (await sb.from('recipes')).delete(item.id); });
+  };
+
+  const invoiceToDb = (i: Invoice) => ({
+    invoice_number: i.invoiceNumber, vendor: i.vendor, invoice_date: i.invoiceDate,
+    delivery_date: i.deliveryDate, po_number: i.poNumber, lines: i.lines, status: i.status,
+  });
+  const setInvoicesDb = (v: Invoice[] | ((p: Invoice[]) => Invoice[])) => {
+    const prev = invoices;
+    const next = typeof v === 'function' ? v(prev) : v;
+    setInvoices(next);
+    const prevIds = new Set(prev.map(i => i.id));
+    const nextIds = new Set(next.map(i => i.id));
+    next.forEach(async item => {
+      const old = prev.find(p => p.id === item.id);
+      if (!old || JSON.stringify(old) !== JSON.stringify(item)) {
+        if (prevIds.has(item.id)) { await (await sb.from('invoices')).update(invoiceToDb(item), item.id); }
+        else { await (await sb.from('invoices')).insert(invoiceToDb(item)); await syncInvoices(); }
+      }
+    });
+    prev.forEach(async item => { if (!nextIds.has(item.id)) await (await sb.from('invoices')).delete(item.id); });
+  };
+
+  const invToDb = (r: InventoryRow) => ({
+    ingredient_id: r.ingredientId, name: r.name, storage: r.storage,
+    beginning_qty: r.beginningQty, purchases_qty: r.purchasesQty, ending_qty: r.endingQty,
+    theoretical_usage: r.theoreticalUsage, actual_usage: r.actualUsage,
+    par_level: r.parLevel, count_unit: r.countUnit,
+  });
+  const setInventoryDb = (v: InventoryRow[] | ((p: InventoryRow[]) => InventoryRow[])) => {
+    const prev = inventory;
+    const next = typeof v === 'function' ? v(prev) : v;
+    setInventory(next);
+    const prevIds = new Set(prev.map(i => i.id));
+    const nextIds = new Set(next.map(i => i.id));
+    next.forEach(async item => {
+      const old = prev.find(p => p.id === item.id);
+      if (!old || JSON.stringify(old) !== JSON.stringify(item)) {
+        if (prevIds.has(item.id)) { await (await sb.from('inventory')).update(invToDb(item), item.id); }
+        else { await (await sb.from('inventory')).insert(invToDb(item)); await syncInventory(); }
+      }
+    });
+    prev.forEach(async item => { if (!nextIds.has(item.id)) await (await sb.from('inventory')).delete(item.id); });
+  };
+
+  const wasteToDb = (w: WasteEntry) => ({
+    date: w.date, item: w.item, qty: w.qty, unit: w.unit, cost: w.cost,
+    reason: w.reason, station: w.station, employee: w.employee, notes: w.notes,
+    corrective_action: w.correctiveAction,
+  });
+  const setWasteDb = (v: WasteEntry[] | ((p: WasteEntry[]) => WasteEntry[])) => {
+    const prev = waste;
+    const next = typeof v === 'function' ? v(prev) : v;
+    setWaste(next);
+    const prevIds = new Set(prev.map(i => i.id));
+    const nextIds = new Set(next.map(i => i.id));
+    next.forEach(async item => {
+      const old = prev.find(p => p.id === item.id);
+      if (!old || JSON.stringify(old) !== JSON.stringify(item)) {
+        if (prevIds.has(item.id)) { await (await sb.from('waste')).update(wasteToDb(item), item.id); }
+        else { await (await sb.from('waste')).insert(wasteToDb(item)); await syncWaste(); }
+      }
+    });
+    prev.forEach(async item => { if (!nextIds.has(item.id)) await (await sb.from('waste')).delete(item.id); });
+  };
+
+  const yieldToDb = (y: YieldTest) => ({
+    ingredient_name: y.ingredientName, raw_weight_oz: y.rawWeightOz,
+    trim_weight_oz: y.trimWeightOz, usable_weight_oz: y.usableWeightOz,
+    cost_before_yield: y.costBeforeYield, notes: y.notes,
+  });
+  const setYieldTestsDb = (v: YieldTest[] | ((p: YieldTest[]) => YieldTest[])) => {
+    const prev = yieldTests;
+    const next = typeof v === 'function' ? v(prev) : v;
+    setYieldTests(next);
+    const prevIds = new Set(prev.map(i => i.id));
+    const nextIds = new Set(next.map(i => i.id));
+    next.forEach(async item => {
+      const old = prev.find(p => p.id === item.id);
+      if (!old || JSON.stringify(old) !== JSON.stringify(item)) {
+        if (prevIds.has(item.id)) { await (await sb.from('yield_tests')).update(yieldToDb(item), item.id); }
+        else { await (await sb.from('yield_tests')).insert(yieldToDb(item)); await syncYield(); }
+      }
+    });
+    prev.forEach(async item => { if (!nextIds.has(item.id)) await (await sb.from('yield_tests')).delete(item.id); });
+  };
+
+  const sopToDb = (s: SopEntry) => ({
+    title: s.title, station: s.station, type: s.type, content: s.content,
+  });
+  const setSopsDb = (v: SopEntry[] | ((p: SopEntry[]) => SopEntry[])) => {
+    const prev = sops;
+    const next = typeof v === 'function' ? v(prev) : v;
+    setSops(next);
+    const prevIds = new Set(prev.map(i => i.id));
+    const nextIds = new Set(next.map(i => i.id));
+    next.forEach(async item => {
+      const old = prev.find(p => p.id === item.id);
+      if (!old || JSON.stringify(old) !== JSON.stringify(item)) {
+        if (prevIds.has(item.id)) { await (await sb.from('sops')).update(sopToDb(item), item.id); }
+        else { await (await sb.from('sops')).insert(sopToDb(item)); await syncSops(); }
+      }
+    });
+    prev.forEach(async item => { if (!nextIds.has(item.id)) await (await sb.from('sops')).delete(item.id); });
+  };
+
+  const vendorToDb = (v: Vendor) => ({
+    name: v.name, rep_name: v.repName, phone: v.phone, email: v.email,
+    account_number: v.accountNumber, delivery_days: v.deliveryDays,
+    order_minimum: v.orderMinimum, payment_terms: v.paymentTerms, notes: v.notes,
+  });
+  const setVendorsDb = (v: Vendor[] | ((p: Vendor[]) => Vendor[])) => {
+    const prev = vendors;
+    const next = typeof v === 'function' ? v(prev) : v;
+    setVendors(next);
+    const prevIds = new Set(prev.map(i => i.id));
+    const nextIds = new Set(next.map(i => i.id));
+    next.forEach(async item => {
+      const old = prev.find(p => p.id === item.id);
+      if (!old || JSON.stringify(old) !== JSON.stringify(item)) {
+        if (prevIds.has(item.id)) { await (await sb.from('vendors')).update(vendorToDb(item), item.id); }
+        else { await (await sb.from('vendors')).insert(vendorToDb(item)); await syncVendors(); }
+      }
+    });
+    prev.forEach(async item => { if (!nextIds.has(item.id)) await (await sb.from('vendors')).delete(item.id); });
+  };
+
+  const weeklyToDb = (w: WeeklyEntry) => ({
+    week_start: w.weekStart, weekly_sales: w.weeklySales, food_spend: w.foodSpend,
+  });
+  const setWeeklyEntriesDb = (v: WeeklyEntry[] | ((p: WeeklyEntry[]) => WeeklyEntry[])) => {
+    const next = typeof v === 'function' ? v(weeklyEntries) : v;
+    setWeeklyEntries(next);
+    next.forEach(async w => {
+      await (await sb.from('weekly_entries')).upsert(weeklyToDb(w));
     });
   };
 
-  return [state, setState];
-}
+  if (loading) return (
+    <div style={{ height:'100vh', display:'flex', flexDirection:'column', alignItems:'center', justifyContent:'center', background:'#0F1623', color:'#F8FAFC' }}>
+      <div style={{ fontSize:24, fontWeight:500, marginBottom:12 }}>Kitchen<span style={{ color:'#BA7517' }}>IQ</span></div>
+      <div style={{ fontSize:13, color:'#94A3B8' }}>Connecting to database...</div>
+    </div>
+  );
 
-function StoreProvider({ children }: { children: ReactNode }) {
-  const [ingredients,   setIngredients]   = usePersistedState<Ingredient[]>  ('ingredients',   SEED_INGREDIENTS);
-  const [recipes,       setRecipes]        = usePersistedState<Recipe[]>      ('recipes',       SEED_RECIPES);
-  const [invoices,      setInvoices]       = usePersistedState<Invoice[]>     ('invoices',      SEED_INVOICES);
-  const [inventory,     setInventory]      = usePersistedState<InventoryRow[]>('inventory',     []);
-  const [waste,         setWaste]          = usePersistedState<WasteEntry[]>  ('waste',         SEED_WASTE);
-  const [yieldTests,    setYieldTests]     = usePersistedState<YieldTest[]>   ('yieldTests',    SEED_YIELD_TESTS);
-  const [sops,          setSops]           = usePersistedState<SopEntry[]>    ('sops',          SEED_SOP);
-  const [vendors,       setVendors]        = usePersistedState<Vendor[]>      ('vendors',       SEED_VENDORS);
-  const [weeklyEntries, setWeeklyEntries]  = usePersistedState<WeeklyEntry[]> ('weeklyEntries', []);
-  const [targetFcPct,   setTargetFcPct]    = usePersistedState<number>        ('targetFcPct',   29);
-  const [role,          setRole]           = usePersistedState<string>        ('role',          'Executive Chef');
+  if (error) return (
+    <div style={{ height:'100vh', display:'flex', flexDirection:'column', alignItems:'center', justifyContent:'center', background:'#0F1623', color:'#F8FAFC', padding:30, textAlign:'center' }}>
+      <div style={{ fontSize:24, fontWeight:500, marginBottom:12 }}>Kitchen<span style={{ color:'#BA7517' }}>IQ</span></div>
+      <div style={{ fontSize:13, color:'#EF4444', marginBottom:20, maxWidth:400 }}>{error}</div>
+      <button onClick={()=>window.location.reload()} style={{ padding:'8px 20px', background:'#BA7517', border:'none', borderRadius:6, color:'#fff', fontSize:13, cursor:'pointer' }}>Retry</button>
+    </div>
+  );
 
   return (
-    <StoreContext.Provider value={{ ingredients, setIngredients, recipes, setRecipes, invoices, setInvoices, inventory, setInventory, waste, setWaste, yieldTests, setYieldTests, sops, setSops, vendors, setVendors, weeklyEntries, setWeeklyEntries, targetFcPct, setTargetFcPct, role, setRole }}>
+    <StoreContext.Provider value={{
+      ingredients,      setIngredients: setIngredientsDb,
+      recipes,          setRecipes: setRecipesDb,
+      invoices,         setInvoices: setInvoicesDb,
+      inventory,        setInventory: setInventoryDb,
+      waste,            setWaste: setWasteDb,
+      yieldTests,       setYieldTests: setYieldTestsDb,
+      sops,             setSops: setSopsDb,
+      vendors,          setVendors: setVendorsDb,
+      weeklyEntries,    setWeeklyEntries: setWeeklyEntriesDb,
+      targetFcPct,
+      setTargetFcPct,
+      role,
+      setRole,
+    }}>
       {children}
     </StoreContext.Provider>
   );
@@ -1160,7 +1527,7 @@ function InventoryPage() {
     <div>
       <div style={{ display:'flex', gap:8, marginBottom:12, flexWrap:'wrap' }}>
         <Btn primary onClick={()=>setShowAdd(!showAdd)}>+ Add item</Btn>
-        <Btn onClick={importFromIngredients}>↓ Import from ingredients</Btn>
+        <Btn onClick={importFromIngredients}>Import from ingredients</Btn>
         <input style={{ ...inputSt, flex:1, minWidth:180 }} placeholder="Search items, storage area..." value={search} onChange={e=>setSearch(e.target.value)} />
       </div>
 
@@ -2201,8 +2568,8 @@ function Reports() {
     <div>
       {/* Export / Print actions */}
       <div style={{ display:'flex', gap:8, marginBottom:12 }}>
-        <Btn onClick={exportCSV}>↓ Export CSV</Btn>
-        <Btn onClick={printReport}>🖨 Print report</Btn>
+        <Btn onClick={exportCSV}>Export CSV</Btn>
+        <Btn onClick={printReport}>Print report</Btn>
       </div>
 
       {/* Date range picker */}
@@ -2315,8 +2682,18 @@ function Permissions() {
   const { role, setRole } = useStore();
   const [confirmReset, setConfirmReset] = useState(false);
 
-  const resetAllData = () => {
-    Object.keys(localStorage).filter(k => k.startsWith('kiq_')).forEach(k => localStorage.removeItem(k));
+  const resetAllData = async () => {
+    const tables = ['waste','inventory','invoices','recipes','ingredients','vendors','sops','yield_tests','weekly_entries'];
+    for (const t of tables) {
+      await fetch(`${SUPABASE_URL}/rest/v1/${t}?id=gt.0`, {
+        method:'DELETE',
+        headers:{ 'apikey':SUPABASE_KEY, 'Authorization':`Bearer ${SUPABASE_KEY}` }
+      });
+    }
+    await fetch(`${SUPABASE_URL}/rest/v1/settings?key=like.*`, {
+      method:'DELETE',
+      headers:{ 'apikey':SUPABASE_KEY, 'Authorization':`Bearer ${SUPABASE_KEY}` }
+    });
     window.location.reload();
   };
 
@@ -2337,10 +2714,10 @@ function Permissions() {
       <div style={{ ...card, border:`1px solid ${C.border}` }}>
         <div style={sectionTitle}>Data persistence</div>
         <div style={{ fontSize:12, color:C.muted, marginBottom:12, lineHeight:1.6 }}>
-          All your data is automatically saved to this browser's localStorage as you work — ingredients, recipes, invoices, waste logs, vendors, and weekly entries all persist through page refreshes. Data is stored locally in this browser only.
+          All your data is saved to your Supabase cloud database in real time. Every device — phone, iPad, laptop, desktop — reads and writes the same data. Changes you make on one device appear on all others automatically.
         </div>
         <div style={{ fontSize:12, color:C.muted, marginBottom:12 }}>
-          To back up your data: open the browser console and run <code style={{ background:C.navy, padding:'1px 5px', borderRadius:3, fontSize:11, fontFamily:C.mono }}>JSON.stringify(Object.fromEntries(Object.entries(localStorage).filter(([k])={'>'} k.startsWith('kiq_'))))</code> and copy the output.
+          Your data is stored securely in Supabase (PostgreSQL). To export a full backup, go to your Supabase dashboard → Table Editor → select any table → Export as CSV.
         </div>
         <div style={{ display:'flex', gap:8, alignItems:'center' }}>
           {!confirmReset ? (
