@@ -891,10 +891,10 @@ function Dashboard() {
             <div style={{ fontSize:12, color:C.muted, padding:'8px 0' }}>No active alerts. Enter ingredient prices and sell prices to surface alerts here.</div>
           )}
           {spikes.map(({ing,pct})=>(
-            <AlertItem key={ing.id} iconColor={C.red} iconBg="rgba(239,68,68,0.15)" title={`${ing.name} up ${pct!.toFixed(1)}%`} sub={`${ing.vendor} · baseline $${ing.baselineCost} → current $${ing.currentCost}`} />
+            <Fragment key={ing.id}><AlertItem iconColor={C.red} iconBg="rgba(239,68,68,0.15)" title={`${ing.name} up ${pct!.toFixed(1)}%`} sub={`${ing.vendor} · baseline $${ing.baselineCost} → current $${ing.currentCost}`} /></Fragment>
           ))}
           {platesMissingPrice.slice(0,5).map(p=>(
-            <AlertItem key={p.id} iconColor={C.amber} iconBg="rgba(245,158,11,0.15)" title={`${p.name} — no sell price set`} sub="Add a sell price in Plate Costing to calculate food cost %" />
+            <Fragment key={p.id}><AlertItem iconColor={C.amber} iconBg="rgba(245,158,11,0.15)" title={`${p.name} — no sell price set`} sub="Add a sell price in Plate Costing to calculate food cost %" /></Fragment>
           ))}
         </div>
 
